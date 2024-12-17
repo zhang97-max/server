@@ -10,7 +10,7 @@ const headers = {
 };
 
 const format = (song) => ({
-	id: { song: song.mid, file: song.file.media_mid },
+	id: { song: song.mid, file: song.mid },
 	name: song.name,
 	duration: song.interval * 1000,
 	album: { id: song.album.mid, name: song.album.name },
@@ -19,19 +19,27 @@ const format = (song) => ({
 
 const search = (info) => {
 	const url =
-		'https://c.y.qq.com/soso/fcgi-bin/client_search_cp?' +
-		'ct=24&qqmusic_ver=1298&new_json=1&remoteplace=txt.yqq.center&' +
-		't=0&aggr=1&cr=1&catZhida=1&lossless=0&flag_qc=0&p=1&n=20&w=' +
-		encodeURIComponent(info.keyword) +
-		'&' +
-		'g_tk=5381&jsonpCallback=MusicJsonCallback10005317669353331&loginUin=0&hostUin=0&' +
-		'format=jsonp&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq&needNewCode=0';
+		'https://u.y.qq.com/cgi-bin/musicu.fcg?data=' +
+		encodeURIComponent(
+			JSON.stringify({
+				search: {
+					method: 'DoSearchForQQMusicDesktop',
+					module: 'music.search.SearchCgiService',
+					param: {
+						num_per_page: 5,
+						page_num: 1,
+						query: info.keyword,
+						search_type: 0,
+					},
+				},
+			})
+		);
 
-	return request('GET', url)
-		.then((response) => response.jsonp())
+	return request('GET', url, headers)
+		.then((response) => response.json())
 		.then((jsonBody) => {
-			const list = jsonBody.data.song.list.map(format);
-			const matched = select(list, info);
+			const result = jsonBody.search.data.body.song.list.map(format);
+			const matched = select(result, info);
 			return matched ? matched.id : Promise.reject();
 		});
 };
@@ -49,7 +57,7 @@ const single = (id, format) => {
 					param: {
 						guid: (Math.random() * 10000000).toFixed(0),
 						loginflag: 1,
-						filename: [format.join(id.file)],
+						filename: format[0] ? [format.join(id.file)] : null,
 						songmid: [id.song],
 						songtype: [0],
 						uin,
@@ -63,9 +71,18 @@ const single = (id, format) => {
 		.then((response) => response.json())
 		.then((jsonBody) => {
 			const { sip, midurlinfo } = jsonBody.req_0.data;
-			return midurlinfo[0].purl
-				? sip[0] + midurlinfo[0].purl
-				: Promise.reject();
+			if (!midurlinfo[0].purl) return Promise.reject();
+
+			const playurl = sip[0] + midurlinfo[0].purl;
+			const header = {
+				range: 'bytes=0-8191',
+				'accept-encoding': 'identity',
+			};
+			return request('GET', playurl, header).then((response) => {
+				if (response.statusCode < 200 || response.statusCode > 299)
+					return Promise.reject();
+				else return playurl;
+			});
 		});
 };
 
@@ -76,6 +93,7 @@ const track = (id) => {
 			['F000', '.flac'],
 			['M800', '.mp3'],
 			['M500', '.mp3'],
+			[null, null],
 		]
 			.slice(
 				headers.cookie || typeof window !== 'undefined'

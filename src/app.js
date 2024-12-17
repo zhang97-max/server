@@ -5,7 +5,10 @@ const config = require('./cli.js')
 		version: packageJson.version,
 	})
 	.option(['-v', '--version'], { action: 'version' })
-	.option(['-p', '--port'], { metavar: 'port', help: 'specify server port' })
+	.option(['-p', '--port'], {
+		metavar: 'http[:https]',
+		help: 'specify server port',
+	})
 	.option(['-a', '--address'], {
 		metavar: 'address',
 		help: 'specify server host',
@@ -55,7 +58,9 @@ if (config.proxyUrl && !/http(s?):\/\/.+:\d+/.test(config.proxyUrl)) {
 	console.log('Please check the proxy url.');
 	process.exit(1);
 }
-if (config.endpoint && !/http(s?):\/\/.+/.test(config.endpoint)) {
+if (!config.endpoint) config.endpoint = 'https://music.163.com';
+else if (config.endpoint === '-') config.endpoint = '';
+else if (!/http(s?):\/\/.+/.test(config.endpoint)) {
 	console.log('Please check the endpoint host.');
 	process.exit(1);
 }
@@ -95,7 +100,13 @@ global.hosts = target.reduce(
 	(result, host) => Object.assign(result, { [host]: config.forceHost }),
 	{}
 );
-server.whitelist = ['://[\\w.]*music\\.126\\.net', '://[\\w.]*vod\\.126\\.net'];
+server.whitelist = [
+	'://[\\w.]*music\\.126\\.net',
+	'://[\\w.]*vod\\.126\\.net',
+	'://acstatic-dun.126.net',
+	'://[\\w.]*\\.netease.com',
+	'://[\\w.]*\\.163yun.com',
+];
 global.cnrelay = config.cnrelay;
 if (config.strict) server.blacklist.push('.*');
 server.authentication = config.token || null;
@@ -141,9 +152,12 @@ const dnsSource =
 
 // Start the "Clean Cache" background task.
 const csgInstance = CacheStorageGroup.getInstance();
-setInterval(() => {
-	csgInstance.cleanup();
-}, 15 * 60 * 1000);
+setInterval(
+	() => {
+		csgInstance.cleanup();
+	},
+	15 * 60 * 1000
+);
 
 Promise.all(
 	dnsSource.map((query) => query(target.join(','))).concat(target.map(dns))

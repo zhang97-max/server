@@ -95,7 +95,7 @@ const request = (
 			'accept-encoding': 'gzip, deflate',
 			'accept-language': 'zh-CN,zh;q=0.9',
 			'user-agent':
-				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36',
+				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
 			...headers,
 		},
 		proxy
@@ -177,11 +177,17 @@ const read = (connect, raw) =>
 			.on('end', () => resolve(Buffer.concat(chunks)))
 			.on('error', (error) => reject(error));
 	}).then((buffer) => {
-		buffer =
-			buffer.length &&
-			['gzip', 'deflate'].includes(connect.headers['content-encoding'])
-				? zlib.unzipSync(buffer)
-				: buffer;
+		if (buffer.length) {
+			switch (connect.headers['content-encoding']) {
+				case 'deflate':
+				case 'gzip':
+					buffer = zlib.unzipSync(buffer);
+					break;
+				case 'br':
+					buffer = zlib.brotliDecompressSync(buffer);
+					break;
+			}
+		}
 		return raw ? buffer : buffer.toString();
 	});
 

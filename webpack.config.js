@@ -1,3 +1,6 @@
+const TerserPlugin = require('terser-webpack-plugin');
+const webpack = require('webpack');
+
 module.exports = {
 	target: 'node',
 	mode: 'production',
@@ -21,7 +24,25 @@ module.exports = {
 			},
 		],
 	},
+	plugins: [
+		new webpack.BannerPlugin({
+			banner: '#!/usr/bin/env node',
+			raw: true,
+		}),
+	],
 	optimization: {
-		minimize: false,
+		minimize: true,
+		minimizer: [
+			new TerserPlugin({
+				parallel: true,
+				minify: TerserPlugin.swcMinify,
+				terserOptions: {
+					compress: {
+						ecma: 2018,
+					},
+					// https://swc.rs/docs/configuration/minification#jscminifycompress
+				},
+			}),
+		],
 	},
 };

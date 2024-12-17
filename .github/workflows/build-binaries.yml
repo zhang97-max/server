@@ -35,17 +35,17 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v2
+            - uses: actions/checkout@v4
 
-            - name: Use Node.js 16
-              uses: actions/setup-node@v2
+            - name: Use Node.js 20
+              uses: actions/setup-node@v4
               with:
-                  node-version: 16
+                  node-version: 20
                   cache: yarn
 
             - name: Set up QEMU
               id: qemu
-              uses: docker/setup-qemu-action@v1
+              uses: docker/setup-qemu-action@v3
               with:
                   image: tonistiigi/binfmt:latest
                   platforms: all
@@ -58,12 +58,12 @@ jobs:
 
             - name: Building executable file for ${{ matrix.target }}
               run: |
-                  npx pkg --compress Brotli -t node16-${{ matrix.target }} .
+                  npx pkg --compress Brotli -t node18-${{ matrix.target }} .
                   mv "$(ls dist/*)" "$(ls dist/* | sed 's/server/unblockneteasemusic-${{ matrix.target }}/g')"
                   echo "ASSET_NAME=$(ls dist)" >> $GITHUB_ENV
 
             - name: Publishing to GitHub Artifacts
-              uses: actions/upload-artifact@v2
+              uses: actions/upload-artifact@v4
               if: github.event_name != 'release'
               with:
                   name: ${{ env.ASSET_NAME }}
@@ -71,7 +71,7 @@ jobs:
                       ./dist/*
 
             - name: Publishing to GitHub Releases
-              uses: svenstaro/upload-release-action@v2
+              uses: svenstaro/upload-release-action@2.9.0
               if: github.event_name == 'release'
               with:
                   repo_token: ${{ github.token }}

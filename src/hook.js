@@ -3,7 +3,7 @@ const crypto = require('./crypto');
 const request = require('./request');
 const match = require('./provider/match');
 const querystring = require('querystring');
-const { isHost } = require('./utilities');
+const { isHost, cookieToMap, mapToCookie } = require('./utilities');
 const { getManagedCacheStorage } = require('./cache');
 const { logScope } = require('./logger');
 
@@ -11,8 +11,18 @@ const logger = logScope('hook');
 const cs = getManagedCacheStorage('hook');
 cs.aliveDuration = 7 * 24 * 60 * 60 * 1000;
 
-const ENABLE_LOCAL_VIP =
-	(process.env.ENABLE_LOCAL_VIP || '').toLowerCase() === 'true';
+const ENABLE_LOCAL_VIP = ['true', 'cvip', 'svip'].includes(
+	(process.env.ENABLE_LOCAL_VIP || '').toLowerCase()
+);
+const BLOCK_ADS = (process.env.BLOCK_ADS || '').toLowerCase() === 'true';
+const DISABLE_UPGRADE_CHECK =
+	(process.env.DISABLE_UPGRADE_CHECK || '').toLowerCase() === 'true';
+const ENABLE_LOCAL_SVIP =
+	(process.env.ENABLE_LOCAL_VIP || '').toLowerCase() === 'svip';
+const LOCAL_VIP_UID = (process.env.LOCAL_VIP_UID || '')
+	.split(',')
+	.map((str) => parseInt(str))
+	.filter((num) => !Number.isNaN(num));
 
 const hook = {
 	request: {
@@ -37,7 +47,8 @@ hook.target.host = new Set([
 	'interface3.music.163.com',
 	'apm.music.163.com',
 	'apm3.music.163.com',
-	'musicupload.netease.com', // support uploading
+	'interface.music.163.com.163jiasu.com',
+	'interface3.music.163.com.163jiasu.com',
 	// 'mam.netease.com',
 	// 'api.iplay.163.com', // look living
 	// 'ac.dun.163yun.com',
@@ -55,6 +66,7 @@ hook.target.path = new Set([
 	'/api/album/privilege',
 	'/api/v1/artist',
 	'/api/v1/artist/songs',
+	'/api/v2/artist/songs',
 	'/api/artist/top/song',
 	'/api/v1/album',
 	'/api/album/v3/detail',
@@ -62,13 +74,17 @@ hook.target.path = new Set([
 	'/api/song/enhance/player/url',
 	'/api/song/enhance/player/url/v1',
 	'/api/song/enhance/download/url',
+	'/api/song/enhance/download/url/v1',
 	'/api/song/enhance/privilege',
+	'/api/ad',
 	'/batch',
 	'/api/batch',
 	'/api/listen/together/privilege/get',
 	'/api/v1/search/get',
 	'/api/v1/search/song/get',
 	'/api/search/complex/get',
+	'/api/search/complex/page',
+	'/api/search/song/page',
 	'/api/cloudsearch/pc',
 	'/api/v1/playlist/manipulate/tracks',
 	'/api/song/like',
@@ -76,12 +92,13 @@ hook.target.path = new Set([
 	'/api/playlist/v4/detail',
 	'/api/v1/radio/get',
 	'/api/v1/discovery/recommend/songs',
-	'/api/v1/discovery/recommend/songs',
 	'/api/usertool/sound/mobile/promote',
 	'/api/usertool/sound/mobile/theme',
 	'/api/usertool/sound/mobile/animationList',
 	'/api/usertool/sound/mobile/all',
 	'/api/usertool/sound/mobile/detail',
+	'/api/vipauth/app/auth/query',
+	'/api/music-vip-membership/client/vip/info',
 ]);
 
 const domainList = [
@@ -90,6 +107,8 @@ const domainList = [
 	'iplay.163.com',
 	'look.163.com',
 	'y.163.com',
+	'interface.music.163.com',
+	'interface3.music.163.com',
 ];
 
 hook.request.before = (ctx) => {
@@ -98,10 +117,10 @@ hook.request.before = (ctx) => {
 		(req.url.startsWith('http://')
 			? ''
 			: (req.socket.encrypted ? 'https:' : 'http:') +
-			  '//' +
-			  (domainList.some((domain) =>
-					(req.headers.host || '').endsWith(domain)
-			  )
+				'//' +
+				(domainList.some((domain) =>
+					(req.headers.host || '').includes(domain)
+				)
 					? req.headers.host
 					: null)) + req.url;
 	const url = parse(req.url);
@@ -111,12 +130,27 @@ hook.request.before = (ctx) => {
 		)
 	)
 		ctx.decision = 'proxy';
+
+	if (process.env.NETEASE_COOKIE && url.path.includes('url')) {
+		var cookies = cookieToMap(req.headers.cookie);
+		var new_cookies = cookieToMap(process.env.NETEASE_COOKIE);
+
+		Object.entries(new_cookies).forEach(([key, value]) => {
+			cookies[key] = value;
+		});
+
+		req.headers.cookie = mapToCookie(cookies);
+		logger.debug('Replace netease cookie');
+	}
+
 	if (
 		[url.hostname, req.headers.host].some((host) =>
 			hook.target.host.has(host)
 		) &&
 		req.method === 'POST' &&
-		(url.path === '/api/linux/forward' || url.path.startsWith('/eapi/'))
+		(url.path.startsWith('/eapi/') || // eapi
+			// url.path.startsWith('/api/') || // api
+			url.path.startsWith('/api/linux/forward')) // linuxapi
 	) {
 		return request
 			.read(req)
@@ -125,43 +159,81 @@ hook.request.before = (ctx) => {
 				if ('x-napm-retry' in req.headers)
 					delete req.headers['x-napm-retry'];
 				req.headers['X-Real-IP'] = '118.88.88.88';
-				if (req.url.includes('stream')) return; // look living eapi can not be decrypted
+				if (
+					req.url.includes('stream') ||
+					req.url.includes('/eapi/cloud/upload/check')
+				)
+					return; // look living/cloudupload eapi can not be decrypted
+				req.headers['Accept-Encoding'] = 'gzip, deflate'; // https://blog.csdn.net/u013022222/article/details/51707352
 				if (body) {
-					let data;
 					const netease = {};
 					netease.pad = (body.match(/%0+$/) || [''])[0];
-					netease.forward = url.path === '/api/linux/forward';
-					if (netease.forward) {
-						data = JSON.parse(
-							crypto.linuxapi
+					if (url.path === '/api/linux/forward') {
+						netease.crypto = 'linuxapi';
+					} else if (url.path.startsWith('/eapi/')) {
+						netease.crypto = 'eapi';
+					} else if (url.path.startsWith('/api/')) {
+						netease.crypto = 'api';
+					}
+					let data;
+					switch (netease.crypto) {
+						case 'linuxapi':
+							data = JSON.parse(
+								crypto.linuxapi
+									.decrypt(
+										Buffer.from(
+											body.slice(
+												8,
+												body.length - netease.pad.length
+											),
+											'hex'
+										)
+									)
+									.toString()
+							);
+							netease.path = parse(data.url).path;
+							netease.param = data.params;
+							break;
+						case 'eapi':
+							data = crypto.eapi
 								.decrypt(
 									Buffer.from(
 										body.slice(
-											8,
+											7,
 											body.length - netease.pad.length
 										),
 										'hex'
 									)
 								)
 								.toString()
-						);
-						netease.path = parse(data.url).path;
-						netease.param = data.params;
-					} else {
-						data = crypto.eapi
-							.decrypt(
-								Buffer.from(
-									body.slice(
-										7,
-										body.length - netease.pad.length
-									),
-									'hex'
-								)
-							)
-							.toString()
-							.split('-36cd479b6b5-');
-						netease.path = data[0];
-						netease.param = JSON.parse(data[1]);
+								.split('-36cd479b6b5-');
+							netease.path = data[0];
+							netease.param = JSON.parse(data[1]);
+							if (
+								netease.param.hasOwnProperty('e_r') &&
+								(netease.param.e_r == 'true' ||
+									netease.param.e_r == true)
+							) {
+								// eapi's e_r is true, needs to be encrypted
+								netease.e_r = true;
+							} else {
+								netease.e_r = false;
+							}
+							break;
+						case 'api':
+							data = {};
+							decodeURIComponent(body)
+								.split('&')
+								.forEach((pair) => {
+									let [key, value] = pair.split('=');
+									data[key] = value;
+								});
+							netease.path = url.path;
+							netease.param = data;
+							break;
+						default:
+							// unsupported crypto
+							break;
 					}
 					netease.path = netease.path.replace(/\/\d*$/, '');
 					ctx.netease = netease;
@@ -169,6 +241,27 @@ hook.request.before = (ctx) => {
 
 					if (netease.path === '/api/song/enhance/download/url')
 						return pretendPlay(ctx);
+
+					if (netease.path === '/api/song/enhance/download/url/v1')
+						return pretendPlayV1(ctx);
+
+					if (BLOCK_ADS) {
+						if (netease.path.startsWith('/api/ad')) {
+							ctx.error = new Error('ADs blocked.');
+							ctx.decision = 'close';
+						}
+					}
+
+					if (DISABLE_UPGRADE_CHECK) {
+						if (
+							netease.path.match(
+								/^\/api(\/v1)?\/(android|ios|osx|pc)\/(upgrade|version)/
+							)
+						) {
+							ctx.error = new Error('Upgrade check blocked.');
+							ctx.decision = 'close';
+						}
+					}
 				}
 			})
 			.catch(
@@ -236,45 +329,90 @@ hook.request.after = (ctx) => {
 						/([^\\]"\s*:\s*)(\d{16,})(\s*[}|,])/g,
 						'$1"$2L"$3'
 					); // for js precision
-				try {
-					netease.encrypted = false;
-					netease.jsonBody = JSON.parse(patch(buffer.toString()));
-				} catch (error) {
-					netease.encrypted = true;
+
+				if (netease.e_r) {
+					// eapi's e_r is true, needs to be encrypted
 					netease.jsonBody = JSON.parse(
 						patch(crypto.eapi.decrypt(buffer).toString())
 					);
-					if (ENABLE_LOCAL_VIP) {
+				} else {
+					netease.jsonBody = JSON.parse(patch(buffer.toString()));
+				}
+
+				if (ENABLE_LOCAL_VIP) {
+					const vipPath = '/api/music-vip-membership/client/vip/info';
+					if (
+						netease.path === '/batch' ||
+						netease.path === '/api/batch' ||
+						netease.path === vipPath
+					) {
+						const info =
+							netease.path === vipPath
+								? netease.jsonBody
+								: netease.jsonBody[vipPath];
+						const defaultPackage = {
+							iconUrl: null,
+							dynamicIconUrl: null,
+							isSign: false,
+							isSignIap: false,
+							isSignDeduct: false,
+							isSignIapDeduct: false,
+						};
+						const vipLevel = 7; // ? months
 						if (
-							netease.path === '/batch' ||
-							netease.path === '/api/batch'
+							info &&
+							(LOCAL_VIP_UID.length === 0 ||
+								LOCAL_VIP_UID.includes(info.data.userId))
 						) {
-							var info =
-								netease.jsonBody[
-									'/api/music-vip-membership/client/vip/info'
-								];
-							if (info) {
-								try {
-									const expireTime =
-										info.data.now + 31622400000;
-									info.data.redVipLevel = 7;
-									info.data.redVipAnnualCount = 1;
+							try {
+								const nowTime =
+									info.data.now || new Date().getTime();
+								const expireTime = nowTime + 31622400000;
+								info.data.redVipLevel = vipLevel;
+								info.data.redVipAnnualCount = 1;
 
-									info.data.musicPackage.expireTime =
-										expireTime;
-									info.data.musicPackage.vipCode = 230;
+								info.data.musicPackage = {
+									...defaultPackage,
+									...info.data.musicPackage,
+									vipCode: 230,
+									vipLevel,
+									expireTime,
+								};
 
-									info.data.associator.expireTime =
-										expireTime;
+								info.data.associator = {
+									...defaultPackage,
+									...info.data.associator,
+									vipCode: 100,
+									vipLevel,
+									expireTime,
+								};
 
-									netease.jsonBody[
-										'/api/music-vip-membership/client/vip/info'
-									] = info;
-								} catch (error) {
-									logger.debug(
-										'Unable to apply the local VIP.'
-									);
+								if (ENABLE_LOCAL_SVIP) {
+									info.data.redplus = {
+										...defaultPackage,
+										...info.data.redplus,
+										vipCode: 300,
+										vipLevel,
+										expireTime,
+									};
+
+									info.data.albumVip = {
+										...defaultPackage,
+										...info.data.albumVip,
+										vipCode: 400,
+										vipLevel: 0,
+										expireTime,
+									};
 								}
+
+								if (netease.path === vipPath)
+									netease.jsonBody = info;
+								else netease.jsonBody[vipPath] = info;
+							} catch (error) {
+								logger.debug(
+									{ err: error },
+									'Unable to apply the local VIP.'
+								);
 							}
 						}
 					}
@@ -296,7 +434,8 @@ hook.request.after = (ctx) => {
 						if (key.includes('/usertool/sound/'))
 							unblockSoundEffects(netease.jsonBody[key]);
 					}
-				}
+				} else if (netease.path.includes('/vipauth/app/auth/query'))
+					return unblockLyricsEffects(netease.jsonBody);
 			})
 			.then(() => {
 				['transfer-encoding', 'content-encoding', 'content-length']
@@ -306,10 +445,25 @@ hook.request.after = (ctx) => {
 				const inject = (key, value) => {
 					if (typeof value === 'object' && value != null) {
 						if ('cp' in value) value['cp'] = 1;
-						if ('dl' in value && 'downloadMaxbr' in value)
-							value['dl'] = value['downloadMaxbr'];
 						if ('fee' in value) value['fee'] = 0;
-						if ('pl' in value && 'playMaxbr' in value)
+						if (
+							'downloadMaxbr' in value &&
+							value['downloadMaxbr'] === 0
+						)
+							value['downloadMaxbr'] = 320000;
+						if (
+							'dl' in value &&
+							'downloadMaxbr' in value &&
+							value['dl'] < value['downloadMaxbr']
+						)
+							value['dl'] = value['downloadMaxbr'];
+						if ('playMaxbr' in value && value['playMaxbr'] === 0)
+							value['playMaxbr'] = 320000;
+						if (
+							'pl' in value &&
+							'playMaxbr' in value &&
+							value['pl'] < value['playMaxbr']
+						)
 							value['pl'] = value['playMaxbr'];
 						if ('sp' in value && 'st' in value && 'subp' in value) {
 							// batch modify
@@ -330,6 +484,16 @@ hook.request.after = (ctx) => {
 							value['unplayableType'] = 'unknown';
 							value['unplayableUserIds'] = [];
 						}
+						if ('noCopyrightRcmd' in value)
+							value['noCopyrightRcmd'] = null;
+						if ('payed' in value && value['payed'] == 0)
+							value['payed'] = 1;
+						if ('flLevel' in value && value['flLevel'] === 'none')
+							value['flLevel'] = 'exhigh';
+						if ('plLevel' in value && value['plLevel'] === 'none')
+							value['plLevel'] = 'exhigh';
+						if ('dlLevel' in value && value['dlLevel'] === 'none')
+							value['dlLevel'] = 'exhigh';
 					}
 					return value;
 				};
@@ -339,7 +503,7 @@ hook.request.after = (ctx) => {
 					/([^\\]"\s*:\s*)"(\d{16,})L"(\s*[}|,])/g,
 					'$1$2$3'
 				); // for js precision
-				proxyRes.body = netease.encrypted
+				proxyRes.body = netease.e_r // eapi's e_r is true, needs to be encrypted
 					? crypto.eapi.encrypt(Buffer.from(body))
 					: body;
 			})
@@ -399,14 +563,59 @@ const pretendPlay = (ctx) => {
 	const { req, netease } = ctx;
 	const turn = 'http://music.163.com/api/song/enhance/player/url';
 	let query;
-	if (netease.forward) {
-		const { id, br } = netease.param;
-		netease.param = { ids: `["${id}"]`, br };
-		query = crypto.linuxapi.encryptRequest(turn, netease.param);
-	} else {
-		const { id, br, e_r, header } = netease.param;
-		netease.param = { ids: `["${id}"]`, br, e_r, header };
-		query = crypto.eapi.encryptRequest(turn, netease.param);
+	const { id, br, e_r, header } = netease.param;
+	switch (netease.crypto) {
+		case 'linuxapi':
+			netease.param = { ids: `["${id}"]`, br };
+			query = crypto.linuxapi.encryptRequest(turn, netease.param);
+			break;
+		case 'eapi':
+		case 'api':
+			netease.param = { ids: `["${id}"]`, br, e_r, header };
+			if (netease.crypto == 'eapi')
+				query = crypto.eapi.encryptRequest(turn, netease.param);
+			else if (netease.crypto == 'api')
+				query = crypto.api.encryptRequest(turn, netease.param);
+			break;
+		default:
+			break;
+	}
+	req.url = query.url;
+	req.body = query.body + netease.pad;
+};
+
+const pretendPlayV1 = (ctx) => {
+	const { req, netease } = ctx;
+	const turn = 'http://music.163.com/api/song/enhance/player/url/v1';
+	let query;
+	const { id, level, immerseType, e_r, header } = netease.param;
+	switch (netease.crypto) {
+		case 'linuxapi':
+			netease.param = {
+				ids: `["${id}"]`,
+				level,
+				encodeType: 'flac',
+				immerseType,
+			};
+			query = crypto.linuxapi.encryptRequest(turn, netease.param);
+			break;
+		case 'eapi':
+		case 'api':
+			netease.param = {
+				ids: `["${id}"]`,
+				level,
+				encodeType: 'flac',
+				immerseType,
+				e_r,
+				header,
+			};
+			if (netease.crypto == 'eapi')
+				query = crypto.eapi.encryptRequest(turn, netease.param);
+			else if (netease.crypto == 'api')
+				query = crypto.api.encryptRequest(turn, netease.param);
+			break;
+		default:
+			break;
 	}
 	req.url = query.url;
 	req.body = query.body + netease.pad;
@@ -502,17 +711,17 @@ const tryMatch = (ctx) => {
 							? `${global.endpoint.replace(
 									'https://',
 									'http://'
-							  )}/package/${crypto.base64.encode(song.url)}/${
+								)}/package/${crypto.base64.encode(song.url)}/${
 									item.id
-							  }.${item.type}`
+								}.${item.type}`
 							: song.url;
 					} else {
 						item.url = global.endpoint
 							? `${
 									global.endpoint
-							  }/package/${crypto.base64.encode(song.url)}/${
+								}/package/${crypto.base64.encode(song.url)}/${
 									item.id
-							  }.${item.type}`
+								}.${item.type}`
 							: song.url;
 					}
 					item.md5 = song.md5 || crypto.md5.digest(song.url);
@@ -538,7 +747,7 @@ const tryMatch = (ctx) => {
 										? current.map((element) => [element])
 										: aggregation.map((element, index) =>
 												element.concat(current[index])
-										  ),
+											),
 								[]
 							)
 							.filter((pair) => pair[0] !== pair[1])[0];
@@ -596,7 +805,7 @@ const tryMatch = (ctx) => {
 					)
 						.toString()
 						.replace('_0', '')
-			  ); // reduce time cost
+				); // reduce time cost
 		tasks = jsonBody.data.map((item) => inject(item));
 	}
 	return Promise.all(tasks).catch((e) => e && logger.error(e));
@@ -611,6 +820,17 @@ const unblockSoundEffects = (obj) => {
 				if (item.type) item.type = 1;
 			});
 		else if (data.type) data.type = 1;
+	}
+};
+
+const unblockLyricsEffects = (obj) => {
+	logger.debug('unblockLyricsEffects() has been triggered.');
+	const { data, code } = obj;
+	if (code === 200 && Array.isArray(data)) {
+		data.forEach((item) => {
+			if ('canUse' in item) item.canUse = true;
+			if ('canNotUseReasonCode' in item) item.canNotUseReasonCode = 200;
+		});
 	}
 };
 

@@ -41,6 +41,15 @@ module.exports = {
 			};
 		},
 	},
+	api: {
+		encryptRequest: (url, object) => {
+			url = parse(url);
+			return {
+				url: url.href.replace(/\w*api/, 'api'),
+				body: bodyify(object),
+			};
+		},
+	},
 	linuxapi: {
 		encrypt: (buffer) => encrypt(buffer, linuxapiKey),
 		decrypt: (buffer) => decrypt(buffer, linuxapiKey),
@@ -166,6 +175,17 @@ module.exports = {
 					.on('error', (error) => reject(error))
 					.once('finish', () => resolve(digest.read()));
 			}),
+	},
+	sha1: {
+		digest: (value) =>
+			crypto.createHash('sha1').update(value).digest('hex'),
+	},
+	random: {
+		hex: (length) =>
+			crypto
+				.randomBytes(Math.ceil(length / 2))
+				.toString('hex')
+				.slice(0, length),
 	},
 };
 
